@@ -1,5 +1,6 @@
 # NHANES: % current smokers by 2-year cycle (adults >=20y), with survey design
-# Python + rpy2 (to use R's 'survey' package correctly)
+# Pure Python implementation (Windows-friendly) using weighted means and
+# Kish effective sample size to approximate 95% CI (no rpy2/R dependency).
 # Outputs: nhanes_current_smoking_by_cycle.csv and optional plot nhanes_current_smoking_by_cycle.png
 
 import io
@@ -11,27 +12,26 @@ import numpy as np
 import pyreadstat
 import matplotlib.pyplot as plt
 
-# ---- rpy2 / R setup ----
-from rpy2 import robjects as ro
-from rpy2.robjects import pandas2ri
-from rpy2.robjects.packages import importr
-pandas2ri.activate()
-# Import R packages
-survey = importr('survey')
+# ---- Survey computation: pure Python (no rpy2) ----
+# We avoid rpy2/R on Windows for compatibility. We will compute a
+# weighted prevalence and an approximate CI using Kish's effective
+# sample size. This is a reasonable approximation when full Taylor
+# linearization (as in R's 'survey') is not available.
+_APPROX_WARNING_SHOWN = False
 
 # ---- cycles catalog ----
 cycles = pd.DataFrame([
-    ("1999-2000", "1999-2000", "_A", "https://wwwn.cdc.gov/Nchs/Nhanes/1999-2000/"),
-    ("2001-2002", "2001-2002", "_B", "https://wwwn.cdc.gov/Nchs/Nhanes/2001-2002/"),
-    ("2003-2004", "2003-2004", "_C", "https://wwwn.cdc.gov/Nchs/Nhanes/2003-2004/"),
-    ("2005-2006", "2005-2006", "_D", "https://wwwn.cdc.gov/Nchs/Nhanes/2005-2006/"),
-    ("2007-2008", "2007-2008", "_E", "https://wwwn.cdc.gov/Nchs/Nhanes/2007-2008/"),
-    ("2009-2010", "2009-2010", "_F", "https://wwwn.cdc.gov/Nchs/Nhanes/2009-2010/"),
-    ("2011-2012", "2011-2012", "_G", "https://wwwn.cdc.gov/Nchs/Nhanes/2011-2012/"),
-    ("2013-2014", "2013-2014", "_H", "https://wwwn.cdc.gov/Nchs/Nhanes/2013-2014/"),
-    ("2015-2016", "2015-2016", "_I", "https://wwwn.cdc.gov/Nchs/Nhanes/2015-2016/"),
-    ("2017-2018", "2017-2018", "_J", "https://wwwn.cdc.gov/Nchs/Nhanes/2017-2018/"),
-    ("2021-2022", "2021-2022", "_M", "https://wwwn.cdc.gov/Nchs/Nhanes/2021-2022/"),
+    ("1999-2000", "1999-2000", "_A", "https://wwwn.cdc.gov/nchs/nhanes/1999-2000/"),
+    ("2001-2002", "2001-2002", "_B", "https://wwwn.cdc.gov/nchs/nhanes/2001-2002/"),
+    ("2003-2004", "2003-2004", "_C", "https://wwwn.cdc.gov/nchs/nhanes/2003-2004/"),
+    ("2005-2006", "2005-2006", "_D", "https://wwwn.cdc.gov/nchs/nhanes/2005-2006/"),
+    ("2007-2008", "2007-2008", "_E", "https://wwwn.cdc.gov/nchs/nhanes/2007-2008/"),
+    ("2009-2010", "2009-2010", "_F", "https://wwwn.cdc.gov/nchs/nhanes/2009-2010/"),
+    ("2011-2012", "2011-2012", "_G", "https://wwwn.cdc.gov/nchs/nhanes/2011-2012/"),
+    ("2013-2014", "2013-2014", "_H", "https://wwwn.cdc.gov/nchs/nhanes/2013-2014/"),
+    ("2015-2016", "2015-2016", "_I", "https://wwwn.cdc.gov/nchs/nhanes/2015-2016/"),
+    ("2017-2018", "2017-2018", "_J", "https://wwwn.cdc.gov/nchs/nhanes/2017-2018/"),
+    ("2021-2022", "2021-2022", "_M", "https://wwwn.cdc.gov/nchs/nhanes/2021-2022/"),
 ], columns=["cycle","years","suffix","base_url"])
 
 # Optional: include the NCHS combined prepandemic file (2017–Mar 2020)
@@ -44,23 +44,261 @@ prepandemic_entry = {
 }
 
 # ---- helpers ----
+import re
+from urllib.parse import urljoin, urlparse, parse_qs, unquote
 def read_xpt_from_url(url: str) -> pd.DataFrame:
-    r = requests.get(url, timeout=60)
+    # Use a session to preserve cookies the server may set on the doc page
+    session = requests.Session()
+    # Determine referer: for direct XPT, replace .XPT with .htm; for DownloadXpt.aspx, build from query params
+    if 'downloadxpt.aspx' in url.lower():
+        try:
+            pr = urlparse(url)
+            qs = parse_qs(pr.query)
+            file_base = (qs.get('FileName',[None])[0] or '').strip()
+            pth = unquote((qs.get('Path',[None])[0] or ''))
+            if pth and file_base:
+                ref = f"https://{pr.netloc}{pth}{file_base}.htm"
+            else:
+                ref = url
+        except Exception:
+            ref = url
+    else:
+        ref = re.sub(r'\.XPT$', '.htm', url, flags=re.IGNORECASE)
+    base_headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Connection': 'keep-alive',
+    }
+    # Prime cookies by visiting referer (documentation page), if looks like a CDC doc URL
+    try:
+        if ('wwwn.cdc.gov' in ref.lower()) and ref.lower().endswith('.htm'):
+            session.get(ref, headers={**base_headers, 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'}, timeout=60, allow_redirects=True)
+    except Exception:
+        pass
+    # Now download the XPT with Referer header and session cookies
+    xpt_headers = {**base_headers, 'Referer': ref}
+    r = session.get(url, headers=xpt_headers, timeout=60, allow_redirects=True)
+    ctype = r.headers.get('Content-Type', '')
+    data = r.content
+    # If the server returns a smart 404 with 200 status, detect HTML body
+    if 'html' in ctype.lower() or (data[:15].lstrip().lower().startswith(b'<!doctype html') or data[:6].lstrip().lower().startswith(b'<html>')):
+        raise RuntimeError(f"Server returned HTML instead of XPT for {url} (Content-Type={ctype}).")
     r.raise_for_status()
-    df, meta = pyreadstat.read_xport(io.BytesIO(r.content))
-    return df
+    # Try pyreadstat first (read from in-memory buffer)
+    try:
+        df, meta = pyreadstat.read_xport(io.BytesIO(data))
+        return df
+    except Exception as e1:
+        # Fallback to pandas
+        try:
+            with io.BytesIO(data) as bio:
+                df = pd.read_sas(bio, format='xport')
+            return df
+        except Exception as e2:
+            # Attach content-type info for debugging
+            snippet = ''
+            try:
+                text = data[:300].decode('utf-8', errors='ignore')
+                snippet = text.replace('\n', ' ')[:200]
+            except Exception:
+                pass
+            raise RuntimeError(f"Failed to read XPT from {url}. Content-Type={ctype}. pyreadstat: {e1}. pandas: {e2}. First bytes as text: {snippet}")
+
+def list_ftp_xpt_urls(years: str) -> list[str]:
+    """List .XPT file URLs in the NHANES ftp folder for a given years label."""
+    bases = [
+        f"https://ftp.cdc.gov/pub/Health_Statistics/NCHS/nhanes/{years}/",
+        f"https://ftp.cdc.gov/pub/Health_Statistics/NCHS/NHANES/{years}/",
+    ]
+    urls: list[str] = []
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    }
+    for base in bases:
+        try:
+            r = requests.get(base, headers=headers, timeout=60)
+            if r.status_code != 200:
+                continue
+            text = r.text
+            # Try HTML hrefs first
+            found = False
+            for href in re.findall(r'href=[\"\']([^\"\']+)', text, flags=re.IGNORECASE):
+                if href.lower().endswith('.xpt'):
+                    urls.append(urljoin(base, href))
+                    found = True
+            if not found:
+                # Fallback: scan plain text listing for .XPT tokens
+                for token in re.findall(r'[^\s]+\.xpt', text, flags=re.IGNORECASE):
+                    urls.append(urljoin(base, token))
+        except Exception:
+            continue
+    # Deduplicate while preserving order
+    seen = set()
+    out = []
+    for u in urls:
+        if u not in seen:
+            out.append(u)
+            seen.add(u)
+    return out
+
+def discover_xpt_url(years: str, token: str, suffix: str) -> str | None:
+    """Find the best .XPT URL in ftp listing for given token (e.g., DEMO, SMQ) and suffix (e.g., _A)."""
+    try:
+        all_urls = list_ftp_xpt_urls(years)
+    except Exception:
+        all_urls = []
+    if not all_urls:
+        return None
+    token_up = token.upper()
+    suffix_up = suffix.upper()
+    # Priorities: exact token+suffix, then token_*, then contains token
+    # 1) Exact match
+    for u in all_urls:
+        name = u.split('/')[-1].upper()
+        if name == f"{token_up}{suffix_up}.XPT":
+            return u
+    # 2) token with any suffix like token_?.XPT or token?.XPT
+    for u in all_urls:
+        name = u.split('/')[-1].upper()
+        if name.startswith(token_up) and name.endswith('.XPT'):
+            return u
+    # 3) contains token
+    for u in all_urls:
+        if token_up in u.upper() and u.upper().endswith('.XPT'):
+            return u
+    return None
+
+def discover_xpt_from_doc(years: str, token: str, suffix: str) -> str | None:
+    """
+    Access the component documentation page (e.g., DEMO_I.htm) and parse for a .XPT link.
+    Returns the absolute XPT URL if found. Also check for DownloadXpt.aspx links.
+    """
+    token_up = token.upper()
+    suffix_up = suffix.upper()
+    doc_url = f"https://wwwn.cdc.gov/Nchs/Nhanes/{years}/{token_up}{suffix_up}.htm"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Referer': f"https://wwwn.cdc.gov/Nchs/Nhanes/continuousnhanes/default.aspx",
+    }
+    try:
+        r = requests.get(doc_url, headers=headers, timeout=60)
+        if r.status_code != 200:
+            return None
+        html = r.text
+        # Look for direct .XPT links
+        matches = re.findall(r'href=[\"\']([^\"\']+\.xpt)\b', html, flags=re.IGNORECASE)
+        for href in matches:
+            name = href.split('/')[-1]
+            if re.match(fr'^{re.escape(token_up)}{re.escape(suffix_up)}\.xpt$', name, flags=re.IGNORECASE):
+                return urljoin(doc_url, href)
+        # Look for DownloadXpt.aspx links
+        matches2 = re.findall(r'href=[\"\']([^\"\']*DownloadXpt\.aspx\?[^\"\']*)', html, flags=re.IGNORECASE)
+        for href in matches2:
+            if re.search(fr'FileName=({re.escape(token_up)}{re.escape(suffix_up)}|{re.escape(token_up)})', href, flags=re.IGNORECASE) and re.search(fr'ftpname={re.escape(years)}', href, flags=re.IGNORECASE):
+                return urljoin(doc_url, href)
+        # Fallback: any .XPT or DownloadXpt link on the page
+        if matches:
+            return urljoin(doc_url, matches[0])
+        if matches2:
+            return urljoin(doc_url, matches2[0])
+        return None
+    except Exception:
+        return None
+
+def build_downloadxpt_url(years: str, token: str, suffix: str) -> str:
+    """Heuristically construct the CDC DownloadXpt.aspx URL for a component.
+    Example: https://wwwn.cdc.gov/Nchs/Nhanes/DownloadXpt.aspx?FileName=DEMO_I&FileType=XPT&Path=/Nchs/Nhanes/2015-2016/
+    """
+    token_up = token.upper()
+    suffix_up = suffix.upper()
+    file_base = f"{token_up}{suffix_up}".strip()
+    path = f"/Nchs/Nhanes/{years}/"
+    return (
+        "https://wwwn.cdc.gov/Nchs/Nhanes/DownloadXpt.aspx?" +
+        f"FileName={file_base}&FileType=XPT&Path={requests.utils.quote(path, safe='') }"
+    )
 
 def load_cycle(cyc_row: pd.Series) -> pd.DataFrame | None:
     suff = cyc_row["suffix"]
     base = cyc_row["base_url"]
-    demo_url = f"{base}DEMO{suff}.XPT"
-    smq_url  = f"{base}SMQ{suff}.XPT"
-    try:
-        demo = read_xpt_from_url(demo_url)
-        smq  = read_xpt_from_url(smq_url)
-    except Exception as e:
-        print(f"[warn] Could not load {cyc_row['cycle']}: {e}")
-        return None
+    years = cyc_row["years"]
+    # Candidate URLs in priority order
+    primary_with_suffix_demo = f"{base}DEMO{suff}.XPT"
+    primary_with_suffix_smq  = f"{base}SMQ{suff}.XPT"
+    primary_no_suffix_demo   = f"{base}DEMO.XPT"
+    primary_no_suffix_smq    = f"{base}SMQ.XPT"
+    ftp_base = f"https://ftp.cdc.gov/pub/Health_Statistics/NCHS/nhanes/{years}/"
+    ftp_base_caps = f"https://ftp.cdc.gov/pub/Health_Statistics/NCHS/NHANES/{years}/"
+    ftp_with_suffix_demo = f"{ftp_base}DEMO{suff}.XPT"
+    ftp_with_suffix_smq  = f"{ftp_base}SMQ{suff}.XPT"
+    ftp_no_suffix_demo   = f"{ftp_base}DEMO.XPT"
+    ftp_no_suffix_smq    = f"{ftp_base}SMQ.XPT"
+    ftp_caps_with_suffix_demo = f"{ftp_base_caps}DEMO{suff}.XPT"
+    ftp_caps_with_suffix_smq  = f"{ftp_base_caps}SMQ{suff}.XPT"
+    ftp_caps_no_suffix_demo   = f"{ftp_base_caps}DEMO.XPT"
+    ftp_caps_no_suffix_smq    = f"{ftp_base_caps}SMQ.XPT"
+
+    tried = []
+    demo = smq = None
+    for d_url, s_url in [
+        (primary_with_suffix_demo, primary_with_suffix_smq),
+        (primary_no_suffix_demo, primary_no_suffix_smq),
+        (ftp_with_suffix_demo, ftp_with_suffix_smq),
+        (ftp_no_suffix_demo, ftp_no_suffix_smq),
+    ]:
+        try:
+            demo = read_xpt_from_url(d_url)
+            smq  = read_xpt_from_url(s_url)
+            break
+        except Exception as e:
+            tried.append((d_url, s_url, str(e)))
+            demo = smq = None
+            continue
+
+    if demo is None or smq is None:
+        # Try the official DownloadXpt.aspx endpoint
+        try:
+            d_dl = build_downloadxpt_url(years, "DEMO", suff)
+            s_dl = build_downloadxpt_url(years, "SMQ", suff)
+            demo = read_xpt_from_url(d_dl)
+            smq  = read_xpt_from_url(s_dl)
+        except Exception as e_dl:
+            tried.append((d_dl if 'd_dl' in locals() else 'n/a', s_dl if 's_dl' in locals() else 'n/a', str(e_dl)))
+            demo = smq = None
+        # Try discovery from documentation pages next
+        if demo is None or smq is None:
+            d_doc = discover_xpt_from_doc(years, "DEMO", suff)
+            s_doc = discover_xpt_from_doc(years, "SMQ", suff)
+            if d_doc and s_doc:
+                try:
+                    demo = read_xpt_from_url(d_doc)
+                    smq  = read_xpt_from_url(s_doc)
+                except Exception as e3:
+                    tried.append((d_doc, s_doc, str(e3)))
+                    demo = smq = None
+        # If still not found, try discovery from ftp directory listing
+        if demo is None or smq is None:
+            d_disc = discover_xpt_url(years, "DEMO", suff)
+            s_disc = discover_xpt_url(years, "SMQ", suff)
+            if d_disc and s_disc:
+                try:
+                    demo = read_xpt_from_url(d_disc)
+                    smq  = read_xpt_from_url(s_disc)
+                except Exception as e4:
+                    tried.append((d_disc, s_disc, str(e4)))
+                    demo = smq = None
+        if demo is None or smq is None:
+            print(f"[warn] Could not load {cyc_row['cycle']} after trying multiple sources:")
+            for (d_url, s_url, err) in tried:
+                print(f"       - DEMO: {d_url} | SMQ: {s_url} | err: {err}")
+            if 'd_dl' in locals() or 's_dl' in locals():
+                print(f"       - DownloadXpt: DEMO: {d_dl} | SMQ: {s_dl}")
+            if 'd_doc' in locals() or 's_doc' in locals():
+                print(f"       - Doc page discovery: DEMO: {d_doc} | SMQ: {s_doc}")
+            if 'd_disc' in locals() or 's_disc' in locals():
+                print(f"       - FTP discovery: DEMO: {d_disc} | SMQ: {s_disc}")
+            return None
 
     # Keep needed variables and merge
     demo_keep = demo[["SEQN","RIDAGEYR","SDMVSTRA","SDMVPSU","WTINT2YR"]].copy()
@@ -86,33 +324,48 @@ def load_cycle(cyc_row: pd.Series) -> pd.DataFrame | None:
 
 def survey_weighted_prev(df: pd.DataFrame) -> tuple[float,float,float,int]:
     """
-    Use R 'survey' via rpy2 to compute mean(current_smoker==1) with
-    WTINT2YR weights and SDMVSTRA/SDMVPSU design, Taylor linearization.
+    Compute weighted prevalence of current_smoker (1/0) using WTINT2YR.
+    95% CI approximated via Kish effective sample size (neff).
     Returns: (prev_pct, lcl_pct, ucl_pct, n_nonmissing)
+    Note: This approximates R's survey Taylor SE; may be slightly narrower.
     """
+    global _APPROX_WARNING_SHOWN
+    if not _APPROX_WARNING_SHOWN:
+        print("[note] Using approximate CI via Kish effective sample size (no rpy2/R 'survey').")
+        _APPROX_WARNING_SHOWN = True
     # Drop rows with missing outcome
     sub = df[~df["current_smoker"].isna()].copy()
     n = len(sub)
     if n == 0:
         return (np.nan, np.nan, np.nan, 0)
 
-    # Send to R
-    rdf = pandas2ri.py2rpy(sub)
+    y = sub["current_smoker"].astype(float).to_numpy()
+    w = sub["WTINT2YR"].astype(float).to_numpy()
+    # Guard against nonpositive or NaN weights
+    mask = np.isfinite(w) & (w > 0) & np.isfinite(y)
+    y = y[mask]
+    w = w[mask]
+    if w.size == 0 or w.sum() == 0:
+        return (np.nan, np.nan, np.nan, int(mask.sum()))
 
-    # Design: ids=~SDMVPSU, strata=~SDMVSTRA, weights=~WTINT2YR
-    ro.globalenv["dat"] = rdf
-    ro.r('des <- survey::svydesign(ids=~SDMVPSU, strata=~SDMVSTRA, weights=~WTINT2YR, nest=TRUE, data=dat)')
-    # Indicator in R
-    ro.r('dat$current1 <- as.numeric(dat$current_smoker==1)')
-    ro.r('des <- survey::svydesign(ids=~SDMVPSU, strata=~SDMVSTRA, weights=~WTINT2YR, nest=TRUE, data=dat)')
-    # Estimate mean and CI
-    est = ro.r('survey::svymean(~current1, design=des, na.rm=TRUE)')
-    ci  = ro.r('confint(svymean(~current1, design=des, na.rm=TRUE))')
+    # Weighted mean
+    p = float(np.sum(w * y) / np.sum(w))
 
-    prev = float(est[0]) * 100.0
-    lcl  = float(ci[0]) * 100.0
-    ucl  = float(ci[1]) * 100.0
-    return (prev, lcl, ucl, n)
+    # Kish effective sample size
+    sumw = np.sum(w)
+    sumw2 = np.sum(w ** 2)
+    neff = (sumw ** 2) / sumw2 if sumw2 > 0 else np.nan
+
+    # Standard error and 95% CI (Wald)
+    if np.isnan(neff) or neff <= 0:
+        lcl = ucl = p
+    else:
+        se = np.sqrt(max(p * (1 - p), 0.0) / neff)
+        z = 1.96
+        lcl = max(0.0, p - z * se)
+        ucl = min(1.0, p + z * se)
+
+    return (p * 100.0, lcl * 100.0, ucl * 100.0, int(len(sub)))
 
 # ---- run all standard cycles ----
 rows = []
