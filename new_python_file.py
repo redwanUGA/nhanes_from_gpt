@@ -21,17 +21,17 @@ _APPROX_WARNING_SHOWN = False
 
 # ---- cycles catalog ----
 cycles = pd.DataFrame([
-    ("1999-2000", "1999-2000", "_A", "https://wwwn.cdc.gov/nchs/nhanes/1999-2000/"),
-    ("2001-2002", "2001-2002", "_B", "https://wwwn.cdc.gov/nchs/nhanes/2001-2002/"),
-    ("2003-2004", "2003-2004", "_C", "https://wwwn.cdc.gov/nchs/nhanes/2003-2004/"),
-    ("2005-2006", "2005-2006", "_D", "https://wwwn.cdc.gov/nchs/nhanes/2005-2006/"),
-    ("2007-2008", "2007-2008", "_E", "https://wwwn.cdc.gov/nchs/nhanes/2007-2008/"),
-    ("2009-2010", "2009-2010", "_F", "https://wwwn.cdc.gov/nchs/nhanes/2009-2010/"),
-    ("2011-2012", "2011-2012", "_G", "https://wwwn.cdc.gov/nchs/nhanes/2011-2012/"),
-    ("2013-2014", "2013-2014", "_H", "https://wwwn.cdc.gov/nchs/nhanes/2013-2014/"),
-    ("2015-2016", "2015-2016", "_I", "https://wwwn.cdc.gov/nchs/nhanes/2015-2016/"),
-    ("2017-2018", "2017-2018", "_J", "https://wwwn.cdc.gov/nchs/nhanes/2017-2018/"),
-    ("2021-2022", "2021-2022", "_M", "https://wwwn.cdc.gov/nchs/nhanes/2021-2022/"),
+    ("1999-2000", "1999-2000", "_A", "https://wwwn.cdc.gov/Nchs/Nhanes/1999-2000/"),
+    ("2001-2002", "2001-2002", "_B", "https://wwwn.cdc.gov/Nchs/Nhanes/2001-2002/"),
+    ("2003-2004", "2003-2004", "_C", "https://wwwn.cdc.gov/Nchs/Nhanes/2003-2004/"),
+    ("2005-2006", "2005-2006", "_D", "https://wwwn.cdc.gov/Nchs/Nhanes/2005-2006/"),
+    ("2007-2008", "2007-2008", "_E", "https://wwwn.cdc.gov/Nchs/Nhanes/2007-2008/"),
+    ("2009-2010", "2009-2010", "_F", "https://wwwn.cdc.gov/Nchs/Nhanes/2009-2010/"),
+    ("2011-2012", "2011-2012", "_G", "https://wwwn.cdc.gov/Nchs/Nhanes/2011-2012/"),
+    ("2013-2014", "2013-2014", "_H", "https://wwwn.cdc.gov/Nchs/Nhanes/2013-2014/"),
+    ("2015-2016", "2015-2016", "_I", "https://wwwn.cdc.gov/Nchs/Nhanes/2015-2016/"),
+    ("2017-2018", "2017-2018", "_J", "https://wwwn.cdc.gov/Nchs/Nhanes/2017-2018/"),
+    ("2021-2022", "2021-2022", "_M", "https://wwwn.cdc.gov/Nchs/Nhanes/2021-2022/"),
 ], columns=["cycle","years","suffix","base_url"])
 
 # Optional: include the NCHS combined prepandemic file (2017–Mar 2020)
@@ -56,8 +56,11 @@ def read_xpt_from_url(url: str) -> pd.DataFrame:
             qs = parse_qs(pr.query)
             file_base = (qs.get('FileName',[None])[0] or '').strip()
             pth = unquote((qs.get('Path',[None])[0] or ''))
+            ftpname = (qs.get('ftpname',[None])[0] or '').strip()
             if pth and file_base:
                 ref = f"https://{pr.netloc}{pth}{file_base}.htm"
+            elif ftpname and file_base:
+                ref = f"https://{pr.netloc}/Nchs/Nhanes/{ftpname}/{file_base}.htm"
             else:
                 ref = url
         except Exception:
@@ -170,45 +173,53 @@ def discover_xpt_url(years: str, token: str, suffix: str) -> str | None:
 
 def discover_xpt_from_doc(years: str, token: str, suffix: str) -> str | None:
     """
-    Access the component documentation page (e.g., DEMO_I.htm) and parse for a .XPT link.
-    Returns the absolute XPT URL if found. Also check for DownloadXpt.aspx links.
+    Try multiple component documentation URL variants and parse for an .XPT or DownloadXpt link.
     """
     token_up = token.upper()
     suffix_up = suffix.upper()
-    doc_url = f"https://wwwn.cdc.gov/Nchs/Nhanes/{years}/{token_up}{suffix_up}.htm"
+    candidate_docs = [
+        f"https://wwwn.cdc.gov/Nchs/Nhanes/{years}/{token_up}{suffix_up}.htm",
+        f"https://wwwn.cdc.gov/Nchs/Nhanes/{years}/{token_up}.htm",
+        f"https://wwwn.cdc.gov/nchs/nhanes/{years}/{token_up}{suffix_up}.htm",
+        f"https://wwwn.cdc.gov/nchs/nhanes/{years}/{token_up}.htm",
+    ]
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Referer': f"https://wwwn.cdc.gov/Nchs/Nhanes/continuousnhanes/default.aspx",
     }
-    try:
-        r = requests.get(doc_url, headers=headers, timeout=60)
-        if r.status_code != 200:
-            return None
-        html = r.text
-        # Look for direct .XPT links
-        matches = re.findall(r'href=[\"\']([^\"\']+\.xpt)\b', html, flags=re.IGNORECASE)
-        for href in matches:
-            name = href.split('/')[-1]
-            if re.match(fr'^{re.escape(token_up)}{re.escape(suffix_up)}\.xpt$', name, flags=re.IGNORECASE):
-                return urljoin(doc_url, href)
-        # Look for DownloadXpt.aspx links
-        matches2 = re.findall(r'href=[\"\']([^\"\']*DownloadXpt\.aspx\?[^\"\']*)', html, flags=re.IGNORECASE)
-        for href in matches2:
-            if re.search(fr'FileName=({re.escape(token_up)}{re.escape(suffix_up)}|{re.escape(token_up)})', href, flags=re.IGNORECASE) and re.search(fr'ftpname={re.escape(years)}', href, flags=re.IGNORECASE):
-                return urljoin(doc_url, href)
-        # Fallback: any .XPT or DownloadXpt link on the page
-        if matches:
-            return urljoin(doc_url, matches[0])
-        if matches2:
-            return urljoin(doc_url, matches2[0])
-        return None
-    except Exception:
-        return None
+    for doc_url in candidate_docs:
+        try:
+            r = requests.get(doc_url, headers=headers, timeout=60)
+            if r.status_code != 200:
+                continue
+            html = r.text
+            # Look for direct .XPT links
+            matches = re.findall(r'href=[\"\']([^\"\']+\.xpt)\b', html, flags=re.IGNORECASE)
+            for href in matches:
+                name = href.split('/')[-1]
+                if re.match(fr'^{re.escape(token_up)}{re.escape(suffix_up)}\.xpt$', name, flags=re.IGNORECASE) or name.upper().startswith(token_up):
+                    return urljoin(doc_url, href)
+            # Look for DownloadXpt.aspx links
+            matches2 = re.findall(r'href=[\"\']([^\"\']*DownloadXpt\.aspx\?[^\"\']*)', html, flags=re.IGNORECASE)
+            for href in matches2:
+                if re.search(fr'FileName=({re.escape(token_up)}{re.escape(suffix_up)}|{re.escape(token_up)})', href, flags=re.IGNORECASE) and (
+                    re.search(fr'Path=[^&]*/Nchs/Nhanes/{re.escape(years)}/', href, flags=re.IGNORECASE) or
+                    re.search(fr'ftpname={re.escape(years)}', href, flags=re.IGNORECASE)
+                ):
+                    return urljoin(doc_url, href)
+            # Fallback: any .XPT or DownloadXpt link on the page
+            if matches:
+                return urljoin(doc_url, matches[0])
+            if matches2:
+                return urljoin(doc_url, matches2[0])
+        except Exception:
+            continue
+    return None
 
 def build_downloadxpt_url(years: str, token: str, suffix: str) -> str:
     """Heuristically construct the CDC DownloadXpt.aspx URL for a component.
-    Example: https://wwwn.cdc.gov/Nchs/Nhanes/DownloadXpt.aspx?FileName=DEMO_I&FileType=XPT&Path=/Nchs/Nhanes/2015-2016/
+    Example (Path style): https://wwwn.cdc.gov/Nchs/Nhanes/DownloadXpt.aspx?FileName=DEMO_I&FileType=XPT&Path=/Nchs/Nhanes/2015-2016/
     """
     token_up = token.upper()
     suffix_up = suffix.upper()
@@ -216,7 +227,17 @@ def build_downloadxpt_url(years: str, token: str, suffix: str) -> str:
     path = f"/Nchs/Nhanes/{years}/"
     return (
         "https://wwwn.cdc.gov/Nchs/Nhanes/DownloadXpt.aspx?" +
-        f"FileName={file_base}&FileType=XPT&Path={requests.utils.quote(path, safe='') }"
+        f"FileName={file_base}&FileType=XPT&Path={requests.utils.quote(path, safe='/') }"
+    )
+
+def build_downloadxpt_url_ftpname(years: str, token: str, suffix: str) -> str:
+    """Alternate DownloadXpt.aspx URL using ftpname parameter instead of Path."""
+    token_up = token.upper()
+    suffix_up = suffix.upper()
+    file_base = f"{token_up}{suffix_up}".strip()
+    return (
+        "https://wwwn.cdc.gov/Nchs/Nhanes/DownloadXpt.aspx?" +
+        f"FileName={file_base}&FileType=XPT&ftpname={years}"
     )
 
 def load_cycle(cyc_row: pd.Series) -> pd.DataFrame | None:
@@ -241,23 +262,38 @@ def load_cycle(cyc_row: pd.Series) -> pd.DataFrame | None:
 
     tried = []
     demo = smq = None
-    for d_url, s_url in [
-        (primary_with_suffix_demo, primary_with_suffix_smq),
-        (primary_no_suffix_demo, primary_no_suffix_smq),
-        (ftp_with_suffix_demo, ftp_with_suffix_smq),
-        (ftp_no_suffix_demo, ftp_no_suffix_smq),
-    ]:
+
+    # Explicit overrides for cycles with known DataFiles links
+    if years == "2005-2006":
+        override_demo = "https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2005/DataFiles/DEMO_D.xpt"
+        override_smq  = "https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2005/DataFiles/SMQ_D.xpt"
         try:
-            demo = read_xpt_from_url(d_url)
-            smq  = read_xpt_from_url(s_url)
-            break
+            demo = read_xpt_from_url(override_demo)
+            smq  = read_xpt_from_url(override_smq)
         except Exception as e:
-            tried.append((d_url, s_url, str(e)))
+            tried.append((override_demo, override_smq, str(e)))
             demo = smq = None
-            continue
 
     if demo is None or smq is None:
-        # Try the official DownloadXpt.aspx endpoint
+        for d_url, s_url in [
+            (primary_with_suffix_demo, primary_with_suffix_smq),
+            (primary_no_suffix_demo, primary_no_suffix_smq),
+            (ftp_with_suffix_demo, ftp_with_suffix_smq),
+            (ftp_no_suffix_demo, ftp_no_suffix_smq),
+            (ftp_caps_with_suffix_demo, ftp_caps_with_suffix_smq),
+            (ftp_caps_no_suffix_demo, ftp_caps_no_suffix_smq),
+        ]:
+            try:
+                demo = read_xpt_from_url(d_url)
+                smq  = read_xpt_from_url(s_url)
+                break
+            except Exception as e:
+                tried.append((d_url, s_url, str(e)))
+                demo = smq = None
+                continue
+
+    if demo is None or smq is None:
+        # Try the official DownloadXpt.aspx endpoint (Path style first, then ftpname style)
         try:
             d_dl = build_downloadxpt_url(years, "DEMO", suff)
             s_dl = build_downloadxpt_url(years, "SMQ", suff)
@@ -266,6 +302,15 @@ def load_cycle(cyc_row: pd.Series) -> pd.DataFrame | None:
         except Exception as e_dl:
             tried.append((d_dl if 'd_dl' in locals() else 'n/a', s_dl if 's_dl' in locals() else 'n/a', str(e_dl)))
             demo = smq = None
+        if demo is None or smq is None:
+            try:
+                d_dl2 = build_downloadxpt_url_ftpname(years, "DEMO", suff)
+                s_dl2 = build_downloadxpt_url_ftpname(years, "SMQ", suff)
+                demo = read_xpt_from_url(d_dl2)
+                smq  = read_xpt_from_url(s_dl2)
+            except Exception as e_dl2:
+                tried.append((d_dl2 if 'd_dl2' in locals() else 'n/a', s_dl2 if 's_dl2' in locals() else 'n/a', str(e_dl2)))
+                demo = smq = None
         # Try discovery from documentation pages next
         if demo is None or smq is None:
             d_doc = discover_xpt_from_doc(years, "DEMO", suff)
@@ -288,6 +333,18 @@ def load_cycle(cyc_row: pd.Series) -> pd.DataFrame | None:
                 except Exception as e4:
                     tried.append((d_disc, s_disc, str(e4)))
                     demo = smq = None
+        # Last resort: use the static DataFiles path by first year of cycle
+        if demo is None or smq is None:
+            try:
+                first_year = str(years).split('-')[0]
+                letter = str(suff).strip('_')
+                df_demo = f"https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/{first_year}/DataFiles/DEMO_{letter}.xpt"
+                df_smq  = f"https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/{first_year}/DataFiles/SMQ_{letter}.xpt"
+                demo = read_xpt_from_url(df_demo)
+                smq  = read_xpt_from_url(df_smq)
+            except Exception as e5:
+                tried.append((df_demo if 'df_demo' in locals() else 'n/a', df_smq if 'df_smq' in locals() else 'n/a', str(e5)))
+                demo = smq = None
         if demo is None or smq is None:
             print(f"[warn] Could not load {cyc_row['cycle']} after trying multiple sources:")
             for (d_url, s_url, err) in tried:
@@ -298,6 +355,8 @@ def load_cycle(cyc_row: pd.Series) -> pd.DataFrame | None:
                 print(f"       - Doc page discovery: DEMO: {d_doc} | SMQ: {s_doc}")
             if 'd_disc' in locals() or 's_disc' in locals():
                 print(f"       - FTP discovery: DEMO: {d_disc} | SMQ: {s_disc}")
+            if 'df_demo' in locals() or 'df_smq' in locals():
+                print(f"       - DataFiles: DEMO: {df_demo} | SMQ: {df_smq}")
             return None
 
     # Keep needed variables and merge
