@@ -132,18 +132,32 @@ try({
 # -------- save & plot --------
 readr::write_csv(results %>% arrange(cycle), "nhanes_current_smoking_by_cycle.csv")
 
-png("nhanes_current_smoking_by_cycle.png", width=1100, height=600)
-plot(
-  x = seq_len(nrow(results)),
-  y = results$prev,
-  type = "b",
-  xaxt = "n",
-  xlab = "NHANES cycle",
-  ylab = "Current smoking prevalence (%)",
-  main = "NHANES adults (≥20y): Current cigarette smoking by 2-year cycle"
-)
-axis(1, at = seq_len(nrow(results)), labels = results$cycle, las = 2, cex.axis = 0.8)
-arrows(x0=seq_len(nrow(results)), y0=results$lcl, x1=seq_len(nrow(results)), y1=results$ucl, angle=90, code=3, length=0.05)
-dev.off()
+plot_data <- results %>% filter(!is.na(prev))
+
+if (nrow(plot_data) > 0) {
+  png("nhanes_current_smoking_by_cycle.png", width = 1100, height = 600)
+  plot(
+    x = seq_len(nrow(plot_data)),
+    y = plot_data$prev,
+    type = "b",
+    xaxt = "n",
+    xlab = "NHANES cycle",
+    ylab = "Current smoking prevalence (%)",
+    main = "NHANES adults (≥20y): Current cigarette smoking by 2-year cycle"
+  )
+  axis(1, at = seq_len(nrow(plot_data)), labels = plot_data$cycle, las = 2, cex.axis = 0.8)
+  arrows(
+    x0 = seq_len(nrow(plot_data)),
+    y0 = plot_data$lcl,
+    x1 = seq_len(nrow(plot_data)),
+    y1 = plot_data$ucl,
+    angle = 90,
+    code = 3,
+    length = 0.05
+  )
+  dev.off()
+} else {
+  warning("No valid prevalence estimates to plot.")
+}
 
 results %>% arrange(cycle)
