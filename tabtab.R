@@ -1,8 +1,10 @@
-# install.packages(c("tidyverse","haven","survey","srvyr"))
-library(tidyverse)
-library(haven)
-library(survey)
-library(srvyr)
+# ensure required packages are installed and loaded
+required_pkgs <- c("tidyverse", "haven", "survey", "srvyr")
+missing_pkgs <- setdiff(required_pkgs, rownames(installed.packages()))
+if (length(missing_pkgs)) {
+  install.packages(missing_pkgs, repos = "https://cloud.r-project.org")
+}
+invisible(lapply(required_pkgs, library, character.only = TRUE))
 
 # -------- helper: cycle catalog --------
 cycles <- tribble(
@@ -39,7 +41,7 @@ read_cycle <- function(cyc, src="web"){
   smq  <- tryCatch(read_xpt(if (src=="web") smq_url  else file.path(src,  paste0(file_stem$smq,  suff, ".XPT"))),
                    error=function(e) NULL)
   
-  if (is.null(demo) | is.null(smq)) return(NULL)
+  if (is.null(demo) || is.null(smq)) return(NULL)
   
   dat <- demo %>%
     select(SEQN, RIDAGEYR, SDMVSTRA, SDMVPSU, WTINT2YR) %>%
