@@ -471,14 +471,35 @@ print(f"[info] Saved results to {out_csv}")
 try:
     ordered = results.reset_index(drop=True)
     x = np.arange(len(ordered))
-    plt.figure(figsize=(12,6))
-    plt.errorbar(x, ordered["prev"], yerr=[ordered["prev"]-ordered["lcl"], ordered["ucl"]-ordered["prev"]], fmt='o-')
-    plt.xticks(x, ordered["cycle"], rotation=60, ha='right')
-    plt.xlabel("NHANES cycle")
-    plt.ylabel("Current smoking prevalence (%)")
-    plt.title("NHANES adults (≥20y): Current cigarette smoking by 2-year cycle")
-    plt.tight_layout()
-    plt.savefig("nhanes_current_smoking_by_cycle.png", dpi=150)
+    fig, ax = plt.subplots(figsize=(12,6))
+    # Bar chart with error bars (95% CI) and value labels on top
+    heights = ordered["prev"].to_numpy()
+    # Compute asymmetric error bars only if lcl/ucl present
+    if {"lcl", "ucl"}.issubset(ordered.columns):
+        yerr = [ordered["prev"] - ordered["lcl"], ordered["ucl"] - ordered["prev"]]
+    else:
+        yerr = None
+    bars = ax.bar(x, heights, yerr=yerr, capsize=4)
+    ax.set_xticks(x)
+    ax.set_xticklabels(ordered["cycle"], rotation=60, ha='right')
+    ax.set_xlabel("NHANES cycle")
+    ax.set_ylabel("Current smoking prevalence (%)")
+    ax.set_title("NHANES adults (≥20y): Current cigarette smoking by 2-year cycle")
+    # Ensure some headroom for labels
+    try:
+        max_ucl = np.nanmax(ordered["ucl"]) if "ucl" in ordered.columns else np.nanmax(heights)
+        ax.set_ylim(0, max_ucl + 5)
+    except Exception:
+        pass
+    # Add value labels on top of each bar
+    for bar, val in zip(bars, heights):
+        if not np.isnan(val):
+            ax.annotate(f"{val:.1f}",
+                        xy=(bar.get_x() + bar.get_width() / 2, val),
+                        xytext=(0, 3), textcoords="offset points",
+                        ha='center', va='bottom', fontsize=9)
+    fig.tight_layout()
+    fig.savefig("nhanes_current_smoking_by_cycle.png", dpi=150)
     print("[info] Saved plot to nhanes_current_smoking_by_cycle.png")
 except Exception as e:
     print(f"[warn] Plotting failed: {e}")
